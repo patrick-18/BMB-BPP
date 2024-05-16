@@ -1,19 +1,21 @@
 import os
 import numpy as np
 import torch
-from tools import observation_decode_leaf_node, get_leaf_nodes, data_augmentation
+from tools import decode_local_observation
 from tqdm import trange
 from collections import deque
 from tensorboardX import SummaryWriter
 import torch.multiprocessing as mp
+
 np.set_printoptions(threshold=np.inf)
 import time
+
 
 # Distributed training for online packing policy
 def learningPara(T, priority_weight_increase, model_save_path, dqn, mem, timeStr, args, counter, lock, sub_time_str):
     log_writer_path = './logs/runs/{}'.format('IR-' + timeStr + '-loss')
     if not os.path.exists(log_writer_path):
-      os.makedirs(log_writer_path)
+        os.makedirs(log_writer_path)
     writer = SummaryWriter(log_writer_path)
     targetCounter = T
     checkCounter = T
@@ -34,7 +36,8 @@ def learningPara(T, priority_weight_increase, model_save_path, dqn, mem, timeStr
     while True:
         if not lock.value:
             for i in range(len(mem)):
-                mem[i].priority_weight = min(mem[i].priority_weight + priority_weight_increase, 1)  # Anneal importance sampling weight β to 1
+                mem[i].priority_weight = min(mem[i].priority_weight + priority_weight_increase,
+                                             1)  # Anneal importance sampling weight β to 1
 
             dqn.reset_noise()
             loss = dqn.learn(mem)  # Train with n-step distributional double-Q learning
@@ -45,7 +48,7 @@ def learningPara(T, priority_weight_increase, model_save_path, dqn, mem, timeStr
                 dqn.update_target_net()
 
             if timeStep % args.checkpoint_interval == 0:
-                    sub_time_str = time.strftime('%Y.%m.%d-%H-%M-%S', time.localtime(time.time()))
+                sub_time_str = time.strftime('%Y.%m.%d-%H-%M-%S', time.localtime(time.time()))
 
             # Checkpoint the network #
             if (args.checkpoint_interval != 0) and (timeStep - checkCounter >= args.save_interval):
@@ -62,13 +65,14 @@ def learningPara(T, priority_weight_increase, model_save_path, dqn, mem, timeStr
 
 
 class Trainer(object):
-    def __init__(self, writer, timeStr, dqn, mem):
+    def __init__(self, writer, timeStr, dqns, mems):
         self.writer = writer
         self.timeStr = timeStr
-        self.dqn = dqn
-        self.mem = mem
+        self.loc_dqn, self.bin_dqn, self.order_dqn = dqns
+        self.loc_mem, self.bin_mem, self.order_mem = mems
 
     def train_q_value(self, envs, args):
+        global counter, loc_loss, bin_loss, order_loss
         priority_weight_increase = (1 - args.priority_weight) / (args.T_max - args.learn_start)
         sub_time_str = time.strftime('%Y.%m.%d-%H-%M-%S', time.localtime(time.time()))
 
@@ -81,38 +85,39 @@ class Trainer(object):
             if not os.path.exists(memory_save_path):
                 os.makedirs(memory_save_path)
 
-
         episode_rewards = deque(maxlen=10)
         episode_ratio = deque(maxlen=10)
         episode_counter = deque(maxlen=10)
-        state = envs.reset()
+        global_state = envs.reset()
 
         batchX = torch.arange(args.num_processes)
 
         reward_clip = torch.ones((args.num_processes, 1)) * args.reward_clip
-        R, loss = 0, 0
         if args.distributed:
-            counter= mp.Value('i', 0)
+            counter = mp.Value('i', 0)
             lock = mp.Value('b', False)
         # Training loop
-        self.dqn.train()
+        self.loc_dqn.train()
+        self.bin_dqn.train()
+        self.order_dqn.train()
         for T in trange(1, args.T_max + 1):
 
             if T % args.replay_frequency == 0 and not args.distributed:
-                self.dqn.reset_noise()  # Draw a new set of noisy weights
+                self.loc_dqn.reset_noise()  # Draw a new set of noisy weights
+                self.bin_dqn.reset_noise()
+                self.order_dqn.reset_noise()
 
-            all_nodes, leaf_nodes = get_leaf_nodes(state,
-                                                   internal_node_holder=args.internal_node_holder,
-                                                   leaf_node_holder=args.leaf_node_holder)
+            binAction = self.bin_dqn.act(global_state, mask=None)
+            orderAction = self.order_dqn.act(global_state, mask=None)
+            local_state = envs.get_possible_position(binAction.cpu().numpy(), orderAction.cpu().numpy())
+            local_state = torch.from_numpy(np.array(local_state)).float().to(args.device)
 
-            _, _, _, _, mask = observation_decode_leaf_node(all_nodes,
-                                                            internal_node_holder=args.internal_node_holder,
-                                                            leaf_node_holder=args.leaf_node_holder,
-                                                            internal_node_length=args.internal_node_length)
-            action = self.dqn.act(all_nodes, mask)  # Choose an action greedily (with noisy weights)
-            selected_leaf_nodes = leaf_nodes[batchX, action.squeeze()]
+            # decode the observation
+            # TODO: change the observation of single bin to the observation of multiple bins
+            _, leaf_nodes, _, leaf_mask, _ = decode_local_observation(local_state, args)
 
-
+            locAction = self.loc_dqn.act(local_state, mask=leaf_mask)  # Choose an action greedily (with noisy weights)
+            selected_leaf_nodes = leaf_nodes[batchX, locAction.squeeze()]
 
             next_state, reward, done, infos = envs.step(selected_leaf_nodes.cpu().numpy())  # Step
 
@@ -129,48 +134,52 @@ class Trainer(object):
                     if 'counter' in infos[_].keys():
                         episode_counter.append(infos[_]['counter'])
 
-
             if args.reward_clip > 0:
                 reward = torch.maximum(torch.minimum(reward, reward_clip), -reward_clip)  # Clip rewards
 
-            if not args.DA:
-                for i in range(len(state)):
-                    if validSample[i]:
-                        self.mem[i].append(state[i], action[i], reward[i], done[i])  # Append transition to memory
-            else:
-                horizontal_flipped_state, vertical_flipped_state, center_flipped_state = data_augmentation(state, args.container_size)
-                for i in range(len(state)):
-                    if validSample[i]:
-                        self.mem[i].append(state[i], action[i], reward[i], done[i])
-                        self.mem[i].append(horizontal_flipped_state[i], action[i], reward[i], done[i])
-                        self.mem[i].append(vertical_flipped_state[i], action[i], reward[i], done[i])
-                        self.mem[i].append(center_flipped_state[i], action[i], reward[i], done[i])
+            for i in range(args.num_processes):
+                if validSample[i]:
+                    self.loc_mem[i].append(local_state[i], locAction[i], reward[i], done[i])  # Append transition to memory
+                    self.bin_mem[i].append(global_state[i], binAction[i], reward[i], done[i])
+                    self.order_mem[i].append(global_state[i], orderAction[i], reward[i], done[i])
 
             if args.distributed:
                 counter.value = T
                 if T == args.learn_start:
-                    learningProcess = mp.Process(target=learningPara, args=(T, priority_weight_increase, model_save_path, self.dqn, self.mem, self.timeStr, args, counter, lock, sub_time_str))
+                    learningProcess = mp.Process(target=learningPara, args=(
+                    T, priority_weight_increase, model_save_path, self.dqn, self.mem, self.timeStr, args, counter, lock,
+                    sub_time_str))
                     learningProcess.start()
             else:
                 # Train and test
                 if T >= args.learn_start:
-                    for i in range(len(self.mem)):
-                        self.mem[i].priority_weight = min(self.mem[i].priority_weight + priority_weight_increase, 1)  # Anneal importance sampling weight β to 1
+                    for i in range(args.num_processes):
+                        self.loc_mem[i].priority_weight = min(self.loc_mem[i].priority_weight + priority_weight_increase, 1)  # Anneal importance sampling weight β to 1
+                        self.bin_mem[i].priority_weight = min(self.bin_mem[i].priority_weight + priority_weight_increase, 1)
+                        self.order_mem[i].priority_weight = min(self.order_mem[i].priority_weight + priority_weight_increase, 1)
 
                     if T % args.replay_frequency == 0:
-                        loss = self.dqn.learn(self.mem)  # Train with n-step distributional double-Q learning
+                        loc_loss = self.loc_dqn.learn(self.loc_mem)  # Train with n-step distributional double-Q learning
+                        bin_loss = self.bin_dqn.learn(self.bin_mem)
+                        order_loss = self.order_dqn.learn(self.order_mem)
                     # Update target network
                     if T % args.target_update == 0:
-                        self.dqn.update_target_net()
+                        self.loc_dqn.update_target_net()
+                        self.bin_dqn.update_target_net()
+                        self.order_dqn.update_target_net()
 
                     # Checkpoint the network #
                     if (args.checkpoint_interval != 0) and (T % args.save_interval == 0):
                         if T % args.checkpoint_interval == 0:
                             sub_time_str = time.strftime('%Y.%m.%d-%H-%M-%S', time.localtime(time.time()))
-                        self.dqn.save(model_save_path, 'checkpoint{}.pt'.format(sub_time_str))
+                        self.loc_dqn.save(model_save_path, 'locAgent-checkpoint-{}.pt'.format(sub_time_str))
+                        self.bin_dqn.save(model_save_path, 'binAgent-checkpoint-{}.pt'.format(sub_time_str))
+                        self.order_dqn.save(model_save_path, 'orderAgent-checkpoint-{}.pt'.format(sub_time_str))
 
                     if T % args.print_log_interval == 0:
-                        self.writer.add_scalar("Training/Value loss",  loss.mean().item(), T)
+                        self.writer.add_scalar("Training/loc loss", loc_loss.mean().item(), T)
+                        self.writer.add_scalar("Training/bin loss", bin_loss.mean().item(), T)
+                        self.writer.add_scalar("Training/order loss", order_loss.mean().item(), T)
                         if len(episode_rewards) != 0:
                             self.writer.add_scalar('Metric/Reward mean', np.mean(episode_rewards), T)
                             self.writer.add_scalar('Metric/Reward max', np.max(episode_rewards), T)
@@ -180,7 +189,7 @@ class Trainer(object):
                         if len(episode_counter) != 0:
                             self.writer.add_scalar('Metric/Length', np.mean(episode_counter), T)
 
-            if np.all(done): # Terminal state
-                state = envs.reset()
+            if np.all(done):  # Terminal state
+                global_state = envs.reset()
             else:
-                state = next_state
+                global_state = next_state

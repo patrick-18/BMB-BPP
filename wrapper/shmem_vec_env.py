@@ -49,7 +49,8 @@ class ShmemVecEnv(VecEnv):
                 wrapped_fn = CloudpickleWrapper(env_fn)
                 parent_pipe, child_pipe = ctx.Pipe()
                 proc = ctx.Process(target=_subproc_worker,
-                            args=(child_pipe, parent_pipe, wrapped_fn, obs_buf, self.obs_shapes, self.obs_dtypes, self.obs_keys))
+                                   args=(child_pipe, parent_pipe, wrapped_fn, obs_buf, self.obs_shapes, self.obs_dtypes,
+                                         self.obs_keys))
                 proc.daemon = True
                 self.procs.append(proc)
                 self.parent_pipes.append(parent_pipe)
@@ -96,6 +97,11 @@ class ShmemVecEnv(VecEnv):
             pipe.send(('render', None))
         return [pipe.recv() for pipe in self.parent_pipes]
 
+    def get_possible_position(self, binAction, orderAction):
+        for pipe, act in zip(self.parent_pipes, zip(binAction, orderAction)):
+            pipe.send(('get_possible_position', act))
+        return [pipe.recv() for pipe in self.parent_pipes]
+
     def _decode_obses(self, obs):
         result = {}
         for k in self.obs_keys:
@@ -121,6 +127,7 @@ def _subproc_worker(pipe, parent_pipe, env_fn_wrapper, obs_bufs, obs_shapes, obs
     Control a single environment instance using IPC and
     shared memory.
     """
+
     def _write_obs(maybe_dict_obs):
         flatdict = obs_to_dict(maybe_dict_obs)
         for k in keys:
@@ -148,6 +155,8 @@ def _subproc_worker(pipe, parent_pipe, env_fn_wrapper, obs_bufs, obs_shapes, obs
                 break
             elif cmd == 'shot':
                 env.shot(data)
+            elif cmd == 'get_possible_position':
+                pipe.send(env.get_possible_position(data[0], data[1]))
             else:
                 raise RuntimeError('Got unrecognized cmd %s' % cmd)
     except KeyboardInterrupt:

@@ -13,9 +13,14 @@ def get_args():
     parser.add_argument('--shuffle',type=bool, default=True, help='Randomly shuffle the leaf nodes')
     parser.add_argument('--continuous', action='store_true', help='Use continuous enviroment, otherwise the enviroment is discrete')
 
+    # arguments for PyTorch
     parser.add_argument('--no-cuda',action='store_true', help='Forbidden cuda')
     parser.add_argument('--device', type=int, default=0, help='Which GPU will be called')
     parser.add_argument('--seed',   type=int, default=4, help='Random seed')
+
+    # arguments for BPP
+    parser.add_argument('--bin_num', type=int, default=3, help='The number of bins')
+    parser.add_argument('--buffer_size', type=int, default=3, help='The size of item buffer')
 
     # arguments for RL training
     parser.add_argument('--noisy-std', type=float, default=0.5, metavar='σ', help='Initial standard deviation of noisy linear layers')
@@ -54,7 +59,6 @@ def get_args():
     parser.add_argument('--gamma', type=float, default=1.0, metavar='γ', help='Discount factor')
     parser.add_argument('--norm-clip', type=float, default=10, metavar='NORM', help='Max L2 norm for gradient clipping')
     parser.add_argument('--distributed', action='store_true', help='Use distributed training')
-    parser.add_argument('--DA', action='store_true', help='Use data augmentation')
 
     parser.add_argument('--save-interval', default=1000, help='How often to save the model.')
     parser.add_argument('--checkpoint-interval', default=40000,
@@ -81,10 +85,12 @@ def get_args():
     args.container_size = givenData.container_size
     args.item_size_set = givenData.item_size_set
 
+    args.continuous = True
+
     if args.continuous:
-        args.id = 'PctContinuous-v0'
+        args.id = 'PackingContinuous-v0'
     else:
-        args.id = 'PctDiscrete-v0'
+        args.id = 'PackingDiscrete-v0'
 
     if args.sample_from_distribution and args.sample_left_bound is None:
         args.sample_left_bound = 0.1 * min(args.container_size)
@@ -164,7 +170,6 @@ def get_args_heuristic():
     parser.add_argument('--gamma', type=float, default=1.0, metavar='γ', help='Discount factor')
     parser.add_argument('--norm-clip', type=float, default=10, metavar='NORM', help='Max L2 norm for gradient clipping')
     parser.add_argument('--distributed', action='store_true', help='Use distributed training')
-    parser.add_argument('--DA', action='store_true', help='Use data augmentation')
 
     parser.add_argument('--save-interval', default=1000, help='How often to save the model.')
     parser.add_argument('--checkpoint-interval', default=40000,
@@ -191,6 +196,7 @@ def get_args_heuristic():
     args = parser.parse_args()
     args.container_size = givenData.container_size
     args.item_size_set  = givenData.item_size_set
+
     args.evaluate = True
 
     if args.continuous:

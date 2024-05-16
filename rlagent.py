@@ -6,7 +6,7 @@ import torch
 from torch import optim
 from torch.nn.utils import clip_grad_norm_
 from attention_model import AttentionModel
-from tools import get_leaf_nodes
+from tools import decode_local_observation, decode_global_observation
 import math
 
 # Finished
@@ -57,7 +57,6 @@ class Agent():
       sum_q_map = q_map * self.support
       sum_q_map = sum_q_map.sum(2)
       if mask is not None:
-        mask = mask[:, self.internal_node_holder:self.internal_node_holder + self.leaf_node_holder]
         sum_q_map[(1 - mask).bool()] = -math.inf
     return sum_q_map.argmax(1)
 
@@ -85,26 +84,19 @@ class Agent():
     nonterminals = torch.cat(nonterminals, 0).reshape(self.batch_size, 1)
     weights = torch.cat(weights, 0)
 
-    all_nodes, leaf_nodes = get_leaf_nodes(states,
-                                           internal_node_holder=self.internal_node_holder,
-                                           leaf_node_holder=self.leaf_node_holder)
-
     # Calculate current state probabilities (online network noise already sampled)
-    log_ps= self.online_net(all_nodes, log=True, normFactor=self.norm_factor)  # Log probabilities log p(s_t, ·; θonline)
+    log_ps= self.online_net(states, log=True, normFactor=self.norm_factor)  # Log probabilities log p(s_t, ·; θonline)
     log_ps_a = log_ps[range(self.batch_size), actions]  # log p(s_t, a_t; θonline)
 
     with torch.no_grad():
       # Calculate nth next state probabilities
-      all_nodes_next, leaf_nodes_next = get_leaf_nodes(next_states,
-                                                       internal_node_holder=self.internal_node_holder,
-                                                       leaf_node_holder=self.leaf_node_holder)
-      pns = self.online_net(all_nodes_next, normFactor=self.norm_factor)  # Probabilities p(s_t+n, ·; θonline)
+      pns = self.online_net(next_states, normFactor=self.norm_factor)  # Probabilities p(s_t+n, ·; θonline)
       dns = self.support.expand_as(pns) * pns  # Distribution d_t+n = (z, p(s_t+n, ·; θonline))
       argmax_indices_ns = dns.sum(2).argmax(1)  # Perform argmax action selection using online network: argmax_a[(z, p(s_t+n, a; θonline))]
 
       self.target_net.reset_noise()  # Sample new target net noise
 
-      pns = self.target_net(all_nodes_next, normFactor=self.norm_factor)  # Probabilities p(s_t+n, ·; θtarget)
+      pns = self.target_net(next_states, normFactor=self.norm_factor)  # Probabilities p(s_t+n, ·; θtarget)
       pns_a = pns[range(self.batch_size), argmax_indices_ns]  # Double-Q probabilities p(s_t+n, argmax_a[(z, p(s_t+n, a; θonline))]; θtarget)
 
       # Compute Tz (Bellman operator T applied to z)

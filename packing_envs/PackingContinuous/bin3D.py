@@ -5,12 +5,15 @@ from .binCreator import RandomBoxCreator, LoadBoxCreator, BoxCreator
 import torch
 import random
 
+
 class PackingContinuous(gym.Env):
     def __init__(self,
                  args,
-                 next_holder=1, 
                  **kwags):
-        
+
+        self.box_buffer_vec = None
+        self.next_den = None
+        self.next_box = None
         self.args = args
         self.setting = args.setting
         self.bin_size = args.container_size
@@ -19,21 +22,27 @@ class PackingContinuous(gym.Env):
         self.load_test_data = args.load_dataset
         self.internal_node_holder = args.internal_node_holder
         self.leaf_node_holder = args.leaf_node_holder
-        self.next_holder = next_holder
+        self.next_holder = args.buffer_size
         self.shuffle = args.shuffle
-        
+
         self.sample_from_distribution = args.sample_from_distribution
         if self.sample_from_distribution:
             self.size_minimum = args.sample_left_bound
             self.sample_left_bound = args.sample_left_bound
             self.sample_right_bound = args.sample_right_bound
-        else: self.size_minimum = np.min(np.array(self.item_set))
-        
-        if self.setting == 2: self.orientation = 6
-        else: self.orientation = 2
+        else:
+            self.size_minimum = np.min(np.array(self.item_set))
+
+        if self.setting == 2:
+            self.orientation = 6
+        else:
+            self.orientation = 2
 
         # The class that maintains the contents of the bin.
         self.space = Space(*self.bin_size, self.size_minimum, self.internal_node_holder)
+
+        self.spaces = [Space(*self.bin_size, self.size_minimum, self.internal_node_holder) for _ in
+                       range(self.args.bin_num)]
 
         # Generator for train/test data
         if not self.load_test_data:
@@ -45,9 +54,12 @@ class PackingContinuous(gym.Env):
             self.box_creator = LoadBoxCreator(self.data_name)
 
         self.test = args.load_dataset
-        self.observation_space = gym.spaces.Box(low=0.0, high=self.space.height,
-                                                shape=((self.internal_node_holder + self.leaf_node_holder + self.next_holder) * 9,))
-        self.next_box_vec = np.zeros((self.next_holder, 9))
+        self.observation_space = gym.spaces.Box(low=0.0, high=self.spaces[0].height,
+                                                shape=((self.internal_node_holder + self.leaf_node_holder + 1) * 9,))
+        self.global_state_dim = (self.internal_node_holder * self.args.bin_num + self.next_holder) * 9
+        self.box_buffer = []
+        self.next_box_vec = np.zeros((1, 9))
+        self.selected_bin_idx = 0
 
         self.LNES = args.lnes  # Leaf Node Expansion Schemes: EMS
 
@@ -63,80 +75,92 @@ class PackingContinuous(gym.Env):
     # Calculate space utilization inside a bin.
     def get_box_ratio(self):
         coming_box = self.next_box
-        return (coming_box[0] * coming_box[1] * coming_box[2]) / (self.space.plain_size[0] * self.space.plain_size[1] * self.space.plain_size[2])
+        space = self.spaces[self.selected_bin_idx]
+        return (coming_box[0] * coming_box[1] * coming_box[2]) / (
+                    space.plain_size[0] * space.plain_size[1] * space.plain_size[2])
 
     def reset(self):
         self.box_creator.reset()
         self.packed = []
-        self.space.reset()
+        for space in self.spaces:
+            space.reset()
         self.box_creator.generate_box_size()
         cur_observation = self.cur_observation()
         return cur_observation
 
     # Count and return all PCT nodes.
     def cur_observation(self):
+        # information of all packed boxes and boxes to be packed (buffer), excluding the leaf nodes
         boxes = []
-        leaf_nodes = []
-        self.next_box = self.gen_next_box()
-
-        if self.test:
-            if self.setting == 3: self.next_den = self.next_box[3]
-            else: self.next_den = 1
-            self.next_box = [round(self.next_box[0], 3), round(self.next_box[1], 3), round(self.next_box[2], 3)]
-        else:
-            if self.setting < 3: self.next_den = 1
+        while len(self.box_buffer) < self.args.buffer_size:
+            next_box = self.gen_next_box()
+            if self.test:
+                if self.setting == 3:
+                    next_den = next_box[3]
+                else:
+                    next_den = 1
+                next_box = [round(next_box[0], 3), round(next_box[1], 3), round(next_box[2], 3)]
             else:
-                self.next_den = np.random.random()
-                while self.next_den == 0:
-                    self.next_den = np.random.random()
+                if self.setting < 3:
+                    next_den = 1
+                else:
+                    next_den = np.random.random()
+                    while next_den == 0:
+                        next_den = np.random.random()
+            self.box_buffer.append({'box': next_box, 'den': next_den})
 
-        boxes.append(self.space.box_vec)
-        leaf_nodes.append(self.get_possible_position())
+        for space in self.spaces:
+            boxes.append(space.box_vec)
 
-        next_box = sorted(list(self.next_box))
-        self.next_box_vec[:, 3:6] = next_box
-        self.next_box_vec[:, 0] = self.next_den
-        self.next_box_vec[:, -1] = 1
-        return np.reshape(np.concatenate((*boxes, *leaf_nodes, self.next_box_vec)), (-1))
+        self.box_buffer_vec = np.zeros((self.next_holder, 9))
+        for i in range(self.next_holder):
+            self.box_buffer_vec[i, 3:6] = sorted(list(self.box_buffer[i]['box']))
+            self.box_buffer_vec[i, 0] = self.box_buffer[i]['den']
+            self.box_buffer_vec[i, -1] = 1
+
+        return np.reshape(np.concatenate((*boxes, self.box_buffer_vec)), (-1))
 
     # Generate the next item to be placed.
     def gen_next_box(self):
         if self.sample_from_distribution and not self.test:
             if self.setting == 2:
-                next_box = (round(np.random.uniform(self.sample_left_bound,self.sample_right_bound), 3),
-                        round(np.random.uniform(self.sample_left_bound,self.sample_right_bound), 3),
-                        round(np.random.uniform(self.sample_left_bound,self.sample_right_bound), 3))
+                next_box = (round(np.random.uniform(self.sample_left_bound, self.sample_right_bound), 3),
+                            round(np.random.uniform(self.sample_left_bound, self.sample_right_bound), 3),
+                            round(np.random.uniform(self.sample_left_bound, self.sample_right_bound), 3))
             else:
-                next_box = (round(np.random.uniform(self.sample_left_bound,self.sample_right_bound), 3),
-                        round(np.random.uniform(self.sample_left_bound,self.sample_right_bound), 3),
-                        np.random.choice([0.1,0.2,0.3,0.4,0.5]))
+                next_box = (round(np.random.uniform(self.sample_left_bound, self.sample_right_bound), 3),
+                            round(np.random.uniform(self.sample_left_bound, self.sample_right_bound), 3),
+                            np.random.choice([0.1, 0.2, 0.3, 0.4, 0.5]))
         else:
             next_box = self.box_creator.preview(1)[0]
         return next_box
 
     # Detect potential leaf nodes and check their feasibility.
-    def get_possible_position(self):
-        if   self.LNES == 'EMS':
-            allPostion = self.space.EMSPoint(self.next_box, self.setting)
+    def get_possible_position(self, binAction, orderAction):
+        self.next_box = self.box_buffer[orderAction]['box']
+        self.next_den = self.box_buffer[orderAction]['den']
+        self.selected_bin_idx = binAction
+        if self.LNES == 'EMS':
+            allPosition = self.spaces[binAction].EMSPoint(self.next_box, self.setting)
         elif self.LNES == 'EV':
-            allPostion = self.space.EventPoint(self.next_box, self.setting)
+            allPosition = self.spaces[binAction].EventPoint(self.next_box, self.setting)
         else:
             assert False, 'Wrong LNES'
 
         if self.shuffle:
-            np.random.shuffle(allPostion)
+            np.random.shuffle(allPosition)
 
         leaf_node_idx = 0
         leaf_node_vec = np.zeros((self.leaf_node_holder, 9))
         tmp_list = []
 
-        for position in allPostion:
+        for position in allPosition:
             xs, ys, zs, xe, ye, ze = position
             x = xe - xs
             y = ye - ys
             z = ze - zs
 
-            if self.space.drop_box_virtual([x, y, z], (xs, ys), False, self.next_den, self.setting):
+            if self.spaces[binAction].drop_box_virtual([x, y, z], (xs, ys), False, self.next_den, self.setting):
                 tmp_list.append([xs, ys, zs, xe, ye, self.bin_size[2], 0, 0, 1])
                 leaf_node_idx += 1
 
@@ -145,14 +169,21 @@ class PackingContinuous(gym.Env):
         if len(tmp_list) != 0:
             leaf_node_vec[0:len(tmp_list)] = np.array(tmp_list)
 
-        return leaf_node_vec
+        self.next_box_vec = np.zeros((1, 9))
+        self.next_box_vec[0, 3:6] = sorted(list(self.next_box))
+        self.next_box_vec[0, 0] = self.next_den
+        self.next_box_vec[0, -1] = 1
+
+        self.box_buffer.pop(orderAction)
+
+        return np.reshape(np.concatenate((self.spaces[binAction].box_vec, leaf_node_vec, self.next_box_vec)), (-1))
 
     # Convert the selected leaf node to the placement of the current item.
     def LeafNode2Action(self, leaf_node):
         if np.sum(leaf_node[0:6]) == 0: return (0, 0, 0), self.next_box
         x = round(leaf_node[3] - leaf_node[0], 6)
         y = round(leaf_node[4] - leaf_node[1], 6)
-        record = [0,1,2]
+        record = [0, 1, 2]
         for r in record:
             if abs(x - self.next_box[r]) < 1e-6:
                 record.remove(r)
@@ -167,31 +198,35 @@ class PackingContinuous(gym.Env):
         return action, next_box
 
     def step(self, action):
-        if len(action) != 3: action, next_box = self.LeafNode2Action(action)
-        else: next_box = self.next_box
+        if len(action) != 3:
+            action, next_box = self.LeafNode2Action(action)
+        else:
+            next_box = self.next_box
 
         idx = [round(action[1], 6), round(action[2], 6)]
         bin_index = 0
         rotation_flag = action[0]
-        succeeded = self.space.drop_box(next_box, idx, rotation_flag, self.next_den, self.setting)
+        succeeded = self.spaces[self.selected_bin_idx].drop_box(next_box, idx, rotation_flag, self.next_den,
+                                                                self.setting)
 
         if not succeeded:
             reward = 0.0
             done = True
-            info = {'counter': len(self.space.boxes), 'ratio': self.space.get_ratio(),
-                    'reward': self.space.get_ratio() * 10, 'Valid': True}
+            ratio = [space.get_ratio() for space in self.spaces]
+            info = {'counter': len(self.space.boxes), 'ratio': sum(ratio) / len(ratio),
+                    'reward': sum(ratio) * 10 / len(ratio), 'Valid': True}
             return self.cur_observation(), reward, done, info
 
         ################################################
         ############# cal leaf nodes here ##############
         ################################################
-        packed_box = self.space.boxes[-1]
+        packed_box = self.spaces[self.selected_bin_idx].boxes[-1]
 
-        if  self.LNES == 'EMS':
-            self.space.GENEMS([packed_box.lx, packed_box.ly, packed_box.lz,
-                                       round(packed_box.lx + packed_box.x, 6),
-                                       round(packed_box.ly + packed_box.y, 6),
-                                       round(packed_box.lz + packed_box.z, 6)])
+        if self.LNES == 'EMS':
+            self.spaces[self.selected_bin_idx].GENEMS([packed_box.lx, packed_box.ly, packed_box.lz,
+                                                       round(packed_box.lx + packed_box.x, 6),
+                                                       round(packed_box.ly + packed_box.y, 6),
+                                                       round(packed_box.lz + packed_box.z, 6)])
 
         self.packed.append(
             [packed_box.x, packed_box.y, packed_box.z, packed_box.lx, packed_box.ly, packed_box.lz, bin_index])
@@ -206,4 +241,3 @@ class PackingContinuous(gym.Env):
         info['counter'] = len(self.space.boxes)
         info['Valid'] = True
         return self.cur_observation(), reward, done, info
-

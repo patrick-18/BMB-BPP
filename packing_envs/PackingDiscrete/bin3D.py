@@ -8,9 +8,11 @@ import random
 class PackingDiscrete(gym.Env):
     def __init__(self,
                  args,
-                 next_holder=1,
                  **kwags):
 
+        self.box_buffer_vec = None
+        self.next_den = None
+        self.next_box = None
         self.args = args
         self.setting = args.setting
         self.bin_size = args.container_size
@@ -19,7 +21,7 @@ class PackingDiscrete(gym.Env):
         self.load_test_data = args.load_dataset
         self.internal_node_holder = args.internal_node_holder
         self.leaf_node_holder = args.leaf_node_holder
-        self.next_holder = next_holder
+        self.next_holder = args.buffer_size
         self.shuffle = args.shuffle
 
         self.size_minimum = np.min(np.array(self.item_set))
@@ -29,6 +31,8 @@ class PackingDiscrete(gym.Env):
         
         # The class that maintains the contents of the bin.
         self.space = Space(*self.bin_size, self.size_minimum, self.internal_node_holder)
+
+        self.spaces = [Space(*self.bin_size, self.size_minimum, self.internal_node_holder) for _ in range(self.args.bin_num)]
 
         # Generator for train/test data
         if not self.load_test_data:
@@ -41,7 +45,10 @@ class PackingDiscrete(gym.Env):
         self.test = self.load_test_data
         self.observation_space = gym.spaces.Box(low=0.0, high=self.space.height,
                                                 shape=((self.internal_node_holder + self.leaf_node_holder + self.next_holder) * 9,))
-        self.next_box_vec = np.zeros((self.next_holder, 9))
+        self.global_state_dim = (self.internal_node_holder + self.leaf_node_holder + 1) * 9
+        self.box_buffer = []
+        self.next_box_vec = np.zeros((1, 9))
+        self.selected_bin_idx = 0
 
         self.LNES = args.lnes  # Leaf Node Expansion Schemes: EMS (recommend), EV, EP, CP, FC
 
@@ -57,12 +64,15 @@ class PackingDiscrete(gym.Env):
     # Calculate space utilization inside a bin.
     def get_box_ratio(self):
         coming_box = self.next_box
-        return (coming_box[0] * coming_box[1] * coming_box[2]) / (self.space.plain_size[0] * self.space.plain_size[1] * self.space.plain_size[2])
+        space = self.spaces[self.selected_bin_idx]
+        return (coming_box[0] * coming_box[1] * coming_box[2]) / (
+                    space.plain_size[0] * space.plain_size[1] * space.plain_size[2])
 
     def reset(self):
         self.box_creator.reset()
         self.packed = []
-        self.space.reset()
+        for space in self.spaces:
+            space.reset()
         self.box_creator.generate_box_size()
         cur_observation = self.cur_observation()
         return cur_observation
@@ -70,35 +80,43 @@ class PackingDiscrete(gym.Env):
     # Count and return all PCT nodes.
     def cur_observation(self):
         boxes = []
-        leaf_nodes = []
-        self.next_box = self.gen_next_box()
-
-        if self.test:
-            if self.setting == 3: self.next_den = self.next_box[3]
-            else: self.next_den = 1
-            self.next_box = [int(self.next_box[0]), int(self.next_box[1]), int(self.next_box[2])]
-        else:
-            if self.setting < 3: self.next_den = 1
+        while len(self.box_buffer) < self.args.buffer_size:
+            next_box = self.gen_next_box()
+            if self.test:
+                if self.setting == 3:
+                    next_den = next_box[3]
+                else:
+                    next_den = 1
+                next_box = [int(next_box[0]), int(next_box[1]), int(next_box[2])]
             else:
-                self.next_den = np.random.random()
-                while self.next_den == 0:
-                    self.next_den = np.random.random()
+                if self.setting < 3:
+                    next_den = 1
+                else:
+                    next_den = np.random.random()
+                    while next_den == 0:
+                        next_den = np.random.random()
+            self.box_buffer.append({'box': next_box, 'den': next_den})
 
-        boxes.append(self.space.box_vec)
-        leaf_nodes.append(self.get_possible_position())
+        for space in self.spaces:
+            boxes.append(space.box_vec)
 
-        next_box = sorted(list(self.next_box))
-        self.next_box_vec[:, 3:6] = next_box
-        self.next_box_vec[:, 0] = self.next_den
-        self.next_box_vec[:, -1] = 1
-        return np.reshape(np.concatenate((*boxes, *leaf_nodes, self.next_box_vec)), (-1))
+        self.box_buffer_vec = np.zeros((self.next_holder, 9))
+        for i in range(self.next_holder):
+            self.box_buffer_vec[i, 3:6] = sorted(list(self.box_buffer[i]['box']))
+            self.box_buffer_vec[i, 0] = self.box_buffer[i]['den']
+            self.box_buffer_vec[i, -1] = 1
+
+        return np.reshape(np.concatenate((*boxes, self.box_buffer_vec)), (-1))
 
     # Generate the next item to be placed.
     def gen_next_box(self):
         return self.box_creator.preview(1)[0]
 
     # Detect potential leaf nodes and check their feasibility.
-    def get_possible_position(self):
+    def get_possible_position(self, binAction, orderAction):
+        self.next_box = self.box_buffer[orderAction]['box']
+        self.next_den = self.box_buffer[orderAction]['den']
+        self.selected_bin_idx = binAction
         if   self.LNES == 'EMS':
             allPostion = self.space.EMSPoint(self.next_box,  self.setting)
         elif self.LNES == 'EV':
@@ -125,7 +143,7 @@ class PackingDiscrete(gym.Env):
             y = ye - ys
             z = ze - zs
 
-            if self.space.drop_box_virtual([x, y, z], (xs, ys), False, self.next_den, self.setting):
+            if self.spaces[binAction].drop_box_virtual([x, y, z], (xs, ys), False, self.next_den, self.setting):
                 tmp_list.append([xs, ys, zs, xe, ye, self.bin_size[2], 0, 0, 1])
                 leaf_node_idx += 1
 
@@ -134,7 +152,12 @@ class PackingDiscrete(gym.Env):
         if len(tmp_list) != 0:
             leaf_node_vec[0:len(tmp_list)] = np.array(tmp_list)
 
-        return leaf_node_vec
+        self.next_box_vec = np.zeros((1, 9))
+        self.next_box_vec[0, 3:6] = sorted(list(self.next_box))
+        self.next_box_vec[0, 0] = self.next_den
+        self.next_box_vec[0, -1] = 1
+
+        return np.reshape(np.concatenate((self.spaces[binAction].box_vec, leaf_node_vec, self.next_box_vec)), (-1))
 
     # Convert the selected leaf node to the placement of the current item.
     def LeafNode2Action(self, leaf_node):
@@ -156,24 +179,26 @@ class PackingDiscrete(gym.Env):
         idx = [action[1], action[2]]
         bin_index = 0
         rotation_flag = action[0]
-        succeeded = self.space.drop_box(next_box, idx, rotation_flag, self.next_den, self.setting)
+        succeeded = self.spaces[self.selected_bin_idx].drop_box(next_box, idx, rotation_flag, self.next_den, self.setting)
 
         if not succeeded:
             reward = 0.0
             done = True
-            info = {'counter': len(self.space.boxes), 'ratio': self.space.get_ratio(),
-                    'reward': self.space.get_ratio() * 10, 'Valid': True}
+            ratio = [space.get_ratio() for space in self.spaces]
+            info = {'counter': len(self.space.boxes), 'ratio': sum(ratio) / len(ratio),
+                    'reward': sum(ratio) * 10 / len(ratio), 'Valid': True}
             return self.cur_observation(), reward, done, info
 
         ################################################
         ############# cal leaf nodes here ##############
         ################################################
-        packed_box = self.space.boxes[-1]
+        packed_box = self.spaces[self.selected_bin_idx].boxes[-1]
 
         if  self.LNES == 'EMS':
-            self.space.GENEMS([packed_box.lx, packed_box.ly, packed_box.lz,
-                                           packed_box.lx + packed_box.x, packed_box.ly + packed_box.y,
-                                           packed_box.lz + packed_box.z])
+            self.spaces[self.selected_bin_idx].GENEMS([packed_box.lx, packed_box.ly, packed_box.lz,
+                                                       packed_box.lx + packed_box.x,
+                                                       packed_box.ly + packed_box.y,
+                                                       packed_box.lz + packed_box.z])
 
         self.packed.append(
             [packed_box.x, packed_box.y, packed_box.z, packed_box.lx, packed_box.ly, packed_box.lz, bin_index])

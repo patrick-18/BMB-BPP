@@ -1,7 +1,7 @@
 import givenData
 import numpy as np
-from pct_envs.PctDiscrete0 import PackingDiscrete
-from pct_envs.PctContinuous0 import PackingContinuous
+from packing_envs.PackingDiscrete import PackingDiscrete
+from packing_envs.PackingContinuous import PackingContinuous
 from arguments import get_args_heuristic
 
 '''
