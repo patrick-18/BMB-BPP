@@ -4,7 +4,7 @@ import torch
 from tools import decode_local_observation
 from tqdm import trange
 from collections import deque
-from tensorboardX import SummaryWriter
+from torch.utils.tensorboard import SummaryWriter
 import torch.multiprocessing as mp
 
 np.set_printoptions(threshold=np.inf)

@@ -8,7 +8,7 @@ from envs import make_vec_envs
 import numpy as np
 import random
 from trainer import Trainer
-from tensorboardX import SummaryWriter
+from torch.utils.tensorboard import SummaryWriter
 from tools import registration_envs
 from arguments import get_args
 import gym
@@ -41,10 +41,10 @@ def main(args):
 
     # Backup all py files and create tensorboard logs
     log_writer_path = './logs/runs/{}'.format('BMB-BPP-' + timeStr)
-    writer = SummaryWriter(logdir=log_writer_path)
+    writer = SummaryWriter(log_dir=log_writer_path)
     if not os.path.exists(log_writer_path):
         os.makedirs(log_writer_path)
-    backup(timeStr, args, None)
+    # backup(timeStr, args, None)
 
 
     tmp_env = gym.make(args.id, args=args)

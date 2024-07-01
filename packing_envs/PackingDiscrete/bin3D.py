@@ -45,6 +45,7 @@ class PackingDiscrete(gym.Env):
         self.test = self.load_test_data
         self.observation_space = gym.spaces.Box(low=0.0, high=self.space.height,
                                                 shape=((self.internal_node_holder + self.leaf_node_holder + self.next_holder) * 9,))
+        self.action_space = gym.spaces.Box(low=0, high=0, shape=(0,))
         self.global_state_dim = (self.internal_node_holder + self.leaf_node_holder + 1) * 9
         self.box_buffer = []
         self.next_box_vec = np.zeros((1, 9))

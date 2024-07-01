@@ -7,25 +7,6 @@ from graph_encoder import GraphAttentionEncoder, NoisyLinear
 from tools import init, decode_local_observation, decode_global_observation
 
 
-class AttentionModelFixed(NamedTuple):
-    node_embeddings: torch.Tensor
-    context_node_projected: torch.Tensor
-    glimpse_key: torch.Tensor
-    glimpse_val: torch.Tensor
-    logit_key: torch.Tensor
-
-    def __getitem__(self, key):
-        if torch.is_tensor(key) or isinstance(key, slice):
-            return AttentionModelFixed(
-                node_embeddings=self.node_embeddings[key],
-                context_node_projected=self.context_node_projected[key],
-                glimpse_key=self.glimpse_key[:, key],
-                glimpse_val=self.glimpse_val[:, key],
-                logit_key=self.logit_key[key]
-            )
-        return super(AttentionModelFixed, self).__getitem__(key)
-
-
 class AttentionModel(nn.Module):
 
     def __init__(self,

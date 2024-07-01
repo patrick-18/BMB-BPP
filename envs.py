@@ -9,20 +9,20 @@ from wrapper.vec_env import VecEnvWrapper
 from wrapper.shmem_vec_env import ShmemVecEnv
 from wrapper.dummy_vec_env import DummyVecEnv
 
-try:
-    import dm_control2gym
-except ImportError:
-    pass
+# try:
+#     import dm_control2gym
+# except ImportError:
+#     pass
 
-try:
-    import roboschool
-except ImportError:
-    pass
+# try:
+#     import roboschool
+# except ImportError:
+#     pass
 
-try:
-    import pybullet_envs
-except ImportError:
-    pass
+# try:
+#     import pybullet_envs
+# except ImportError:
+#     pass
 
 def make_env(env_id, seed, rank, log_dir, allow_early_resets, args):
     def _thunk():
